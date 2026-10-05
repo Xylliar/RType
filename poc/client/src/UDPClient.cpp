@@ -1,0 +1,184 @@
+/*
+** EPITECH PROJECT, 2024
+** r-type
+** File description:
+** Client
+*/
+
+#include "UDPClient.hpp"
+#include "StringUtils.hpp"
+
+rType::UDPClient::UDPClient(const std::string &ip, std::size_t port, const std::string &username)
+    : _ip(ip), _port(port), _mainPort(port), _username(username), _socket(_ioContext), _serverEndpoint(asio::ip::make_address(ip), port)
+{
+}
+
+rType::UDPClient::~UDPClient()
+{
+    Datatype data;
+    data.id = 0x66;
+    data.length = 0;
+
+    send(data);
+    _ioContext.stop();
+    if (_ioThread.joinable())
+        _ioThread.join();
+}
+
+void rType::UDPClient::start(command_map_t &commands)
+{
+    _commands = commands;
+    _socket.open(udp::v4());
+    connect();
+    _ioThread = std::thread([this] {
+        clientLoop();
+        _ioContext.run();
+    });
+}
+
+std::string rType::UDPClient::getIp() const
+{
+    return _ip;
+}
+
+std::size_t rType::UDPClient::getPort() const
+{
+    return _port;
+}
+
+std::string rType::UDPClient::getUsername() const
+{
+    return _username;
+}
+
+void rType::UDPClient::receive(const asio::error_code &error, std::size_t bytes)
+{
+    if (error) {
+        std::cerr << "Error: " << error.message() << std::endl;
+        return;
+    }
+    try {
+        Datatype data = Datatype::deserialize(_buffer, bytes);
+        auto cmd = _commands.find(data.id);
+
+        if (cmd != _commands.end()) {
+           cmd->second(data);
+        } else {
+            std::cerr << "Unknown command id: " << data.id << std::endl;
+        }
+    } catch (const std::exception &e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+    }
+}
+
+// void rType::UDPClient::send(const Datatype &data)
+// {
+//     _socket.async_send_to(asio::buffer(data.serialize()), _serverEndpoint, [this](const asio::error_code &error, std::size_t) {
+//         if (error) {
+//             std::cerr << "Error: " << error.message() << std::endl;
+//         }
+//     });
+// }
+
+void rType::UDPClient::send(const Datatype &data)
+{
+    std::shared_ptr<std::vector<uint8_t>> serializedData = std::make_shared<std::vector<uint8_t>>(data.serialize());
+    {
+        std::lock_guard<std::mutex> lock(_pendingMutex);
+        _pendingSends.push(serializedData);
+    }
+    std::lock_guard<std::mutex> lock(_mutex);
+    _socket.async_send_to(
+        asio::buffer(*serializedData),
+        _serverEndpoint,
+        [this, serializedData](const asio::error_code &error, std::size_t) {
+            if (error) {
+                std::cerr << "Error: " << error.message() << std::endl;
+            }
+            std::lock_guard<std::mutex> lock(_pendingMutex);
+            if (!_pendingSends.empty()) {
+                _pendingSends.pop();
+            }
+        }
+    );
+}
+
+void rType::UDPClient::clientLoop()
+{
+    _socket.async_receive_from(asio::buffer(_buffer), _serverEndpoint, [this](const asio::error_code &error, std::size_t bytes) {
+        receive(error, bytes);
+        _buffer.fill(0);
+        clientLoop();
+    });
+}
+
+void rType::UDPClient::connect()
+{
+    Datatype data;
+    data.id = 0x65;
+    data.length = _username.size();
+    for (const auto &c : _username) {
+        data.payload.emplace_back(static_cast<uint8_t>(c));
+    }
+
+    send(data);
+}
+
+void rType::UDPClient::updatePort(std::size_t port)
+{
+    if (port == 0) {
+        _port = _mainPort;
+        _serverEndpoint.port(_mainPort);
+    } else {
+        _port = port;
+        _serverEndpoint.port(port);
+    }
+}
+
+void rType::UDPClient::startGame()
+{
+    Datatype data;
+    data.id = 0x6B;
+    data.length = 0;
+
+    send(data);
+}
+
+void rType::UDPClient::createRoom()
+{
+    Datatype data;
+    data.id = 0x67;
+    data.length = 0;
+
+    send(data);
+}
+
+void rType::UDPClient::joinRoom(std::size_t id)
+{
+    Datatype data;
+    data.id = 0x69;
+    data.length = 1;
+    data.payload.emplace_back(static_cast<uint8_t>(id));
+
+    send(data);
+}
+
+
+void rType::UDPClient::leaveRoom()
+{
+    Datatype data;
+    data.id = 0x6A;
+    data.length = 0;
+
+    send(data);
+    _serverEndpoint.port(_mainPort);
+}
+
+void rType::UDPClient::cancelGame()
+{
+    Datatype data;
+    data.id = 0x6C;
+    data.length = 0;
+
+    send(data);
+}
